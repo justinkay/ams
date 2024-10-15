@@ -1,3 +1,4 @@
+from comet_ml import Experiment
 import argparse
 import datasets
 import labelers
@@ -7,19 +8,25 @@ import random
 import numpy as np
 import torch
 from torch.nn.functional import cross_entropy
-from functools import partial
+from torchmetrics import Accuracy
+from tqdm import tqdm
+import os
 
 
 DATASETS = {
     'domainnet126': datasets.DomainNet126,
 }
 
-LOSSES = {
+LOSS_FNS = {
     'domainnet126': cross_entropy,
 }
 
 LABELERS = {
     'oracle': labelers.Oracle
+}
+
+ACCURACY_FNS = {
+    'domainnet126': Accuracy(task="multiclass", num_classes=126, average="macro"), # Musgrave et al use macro average
 }
 
 def seed_all(seed):
@@ -50,10 +57,6 @@ def compute_LUREs(all_preds, d_l_idxs, d_l_ys, qm, loss_fn):
 
     return losses
 
-def ams_acquisition_with_p(d_u, all_preds, p_h=None):
-    pass
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", help="{ 'domainnet126', ... } ", required=True)
@@ -72,15 +75,23 @@ def parse_args():
 
 def main():
     args = parse_args()
-    print(args)
     seed_all(args.seed)
+    
+    experiment = Experiment(
+        project_name="ams",
+        workspace=os.environ["COMET_WORKSPACE"],
+        api_key=os.environ["COMET_API_KEY"]
+    )
+    experiment.set_name("-".join([f'{k}={str(v)}' for k,v in vars(args).items()]))
+    experiment.log_parameters(args)
 
     # load prediction results of all hypotheses
     dataset = DATASETS[args.dataset](args.task)
     dataset.load_runs(subsample_pct=args.subsample_pct)
 
     # for now, dataset-specific loss functions
-    loss_fn = LOSSES[args.dataset]
+    loss_fn = LOSS_FNS[args.dataset]
+    accuracy_fn = ACCURACY_FNS[args.dataset]
 
     # model selection algorithm
     if args.algorithm == 'ours':
@@ -92,7 +103,17 @@ def main():
         raise NotImplementedError("Algorithm" + args.algorithm + "not supported.")
     
     # label function - oracle or user
-    labeler = LABELERS[args.labeler](dataset)
+    oracle = labelers.Oracle(dataset, loss_fn=loss_fn, accuracy_fn=accuracy_fn)
+    if args.labeler == 'oracle':
+        labeler = oracle
+    else:
+        labeler = LABELERS[args.labeler]
+
+    # log our baselines/best case results
+    best_loss = min(oracle.true_losses)
+    best_acc =  max(oracle.true_accs)
+    experiment.log_metric("Best loss", best_loss)
+    experiment.log_metric("Best accuracy", best_acc)
     
     # labeled data point indices and labels - at first, no points are labeled
     d_l_idxs = [] 
@@ -102,10 +123,14 @@ def main():
     d_u_idxs = list(range(dataset.preds.shape[1]))
 
     # store acquisition probabilities for labeled points to compute LURE estimates
-    qms = [] 
+    qms = []
+
+    # metrics we will track
+    cumulative_regret_loss = 0
+    cumulative_regret_acc = 0
 
     # active model selection loop
-    for m in range(args.iters):
+    for m in tqdm(range(args.iters)):
         # sample data point
         d_m_idx, qm = model.do_step(d_u_idxs)
         d_l_idxs.append(d_m_idx)
@@ -123,16 +148,20 @@ def main():
         best_model_idx_pred = np.argmin(np.array(all_LURE_estimates))
         best_loss_pred = all_LURE_estimates[best_model_idx_pred]
         
-        print("iter", m)
-        print("Best model idx pred", best_model_idx_pred)
-        print("Best loss pred", best_loss_pred)
-        print()
+        # log metrics
+        experiment.log_metric("Pred. best model idx", best_model_idx_pred, step=m)
+        experiment.log_metric("Pred. best model, pred. loss", best_loss_pred, step=m)
+        experiment.log_metric("Pred. best model, true loss", oracle.true_losses[best_model_idx_pred], step=m)
+        experiment.log_metric("Pred. best model, true accuracy", oracle.true_accs[best_model_idx_pred], step=m)
 
-        # log results
-        # predicted_idxs.append(best_model_idx_pred)
-        # predicted_best_losses.append(best_loss_pred)
-        # true_best_losses.append(true_losses[best_model_idx_pred])
-        # true_best_accs.append(true_accs[best_model_idx_pred])
+        cumulative_regret_loss += oracle.true_losses[best_model_idx_pred] - best_loss
+        cumulative_regret_acc += best_acc - oracle.true_accs[best_model_idx_pred]
+        experiment.log_metric("Cumulative regret (loss)", cumulative_regret_loss, step=m)
+        experiment.log_metric("Cumulative regret (acc)", cumulative_regret_acc, step=m)
+
+        # log other stuff
+        # P(h=h*)
+        # etc...
 
 if __name__ == "__main__":
     main()
