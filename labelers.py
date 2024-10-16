@@ -27,16 +27,18 @@ class Oracle:
             self.true_losses = []
             for h in range(H):
                 # TODO: will need to change this when we introduce other loss functions
-                ce_loss = loss_fn(torch.tensor(all_preds[h]), torch.tensor(self.labels), reduction='none')
+                ce_loss = loss_fn(all_preds[h], torch.tensor(self.labels), reduction='none')
                 self.true_losses.append(ce_loss.mean())
         
         if accuracy_fn is not None:
             self.true_accs = []
             for h in range(H):
-                self.true_accs.append(accuracy_fn(torch.tensor(softmax(all_preds[h], axis=-1)), torch.tensor(self.labels)))
+                self.true_accs.append(accuracy_fn(torch.softmax(all_preds[h], dim=-1), torch.tensor(self.labels)))
+
+        self.labels = torch.tensor(self.labels, device=dataset.device)
 
     def __call__(self, idx):
-        return self.labels[idx]
+        return self.labels[idx].item()
 
 class User:
     # not implemented

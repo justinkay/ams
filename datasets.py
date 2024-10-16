@@ -4,6 +4,9 @@ import numpy as np
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor
 import random
+import torch
+import h5py
+import logging
 
 
 class DomainNet126:
@@ -12,7 +15,7 @@ class DomainNet126:
     """
 
     def __init__(self, task, base_dir="../powerful-benchmarker/experiments/", use_target_val=False, 
-                 dat_filename="predictions.dat", ckpt_filename="ckpts.txt"):
+                 dat_filename="predictions.pt", ckpt_filename="ckpts.txt"):
         """
         Args:
             task: should be {source}_{target}, e.g. "sketch_painting"
@@ -29,36 +32,30 @@ class DomainNet126:
         self.ckpt_file = os.path.join(self.location, ckpt_filename)
         self.ckpts = []
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     @staticmethod
     def get_ckpt_id(alg, run, epoch):
         return f'{alg}-{run}-{epoch}'
 
-    def load_run(self, alg, run, dtype=np.float32):
-        import h5py
-        import logging
-
+    def load_run(self, alg, run, dtype=torch.float32):
         val_preds_local = {}
         hdf5_file_path = os.path.join(run, 'features/features.hdf5')
 
         try:
-            # Check if the file exists before attempting to open it
-            if not os.path.exists(hdf5_file_path):
-                raise FileNotFoundError(f"File not found: {hdf5_file_path}")
-            
             with h5py.File(hdf5_file_path, "r") as f:
                 epochs = f.keys()
                 for epoch in epochs:
                     ckpt_id = DomainNet126.get_ckpt_id(alg, run, epoch)
                     if self.use_target_val:
-                        tgt_preds = np.array(f[str(epoch)]['inference']['target_val']['logits'][:, :], dtype=dtype)  # shape (len(val), n_classes)
+                        tgt_preds = torch.tensor(f[str(epoch)]['inference']['target_val']['logits'][:, :], dtype=dtype)
                     else:
-                        tgt_preds = np.array(f[str(epoch)]['inference']['target_train']['logits'][:, :], dtype=dtype)  # shape (len(val), n_classes)
+                        tgt_preds = torch.tensor(f[str(epoch)]['inference']['target_train']['logits'][:, :], dtype=dtype)
                     val_preds_local[ckpt_id] = tgt_preds
 
         except FileNotFoundError as fnfe:
-            logging.error(fnfe)  # Log the error for further investigation
-            return {}  # Return an empty dictionary so that missing files are simply skipped
-
+            logging.error(fnfe)
+            return {}
         except Exception as e:
             logging.error(f"An error occurred while processing {hdf5_file_path}: {e}")
             return {}
@@ -66,7 +63,7 @@ class DomainNet126:
         return val_preds_local
 
 
-    def load_runs(self, subsample_pct=100, save_chunk_size=100, force_reload=False):
+    def load_runs(self, subsample_pct=100, batch_size=100, force_reload=False):
         """
         Load predictions into self.preds and save them incrementally to a .dat file.
         Args:
@@ -101,43 +98,28 @@ class DomainNet126:
         algs_list, runs_list = zip(*run_tasks)
         ckpts_per_run = 20 # TODO get this dynamically
 
-        # Initialize memmap to save to the file
+        # Initialize tensor to save to the file
         total_runs = len(run_tasks)
-        run_shape = (total_runs*ckpts_per_run, 7126, 126)  # Adjust this shape according to your data
-        preds_memmap = np.memmap(self.dat_file, dtype=np.float32, mode='w+', shape=run_shape)
+        run_shape = (total_runs*ckpts_per_run, 7126, 126)
+        self.preds = torch.empty(run_shape, dtype=torch.float32, device=self.device)
 
         print(f"Loading predictions from {total_runs} runs from HDF5 files...")
 
-        # Open a file to store the ckpt_ids in order
         with open(self.ckpt_file, 'w') as ckpt_file:
+            current_index = 0
+            for i in tqdm(range(0, len(run_tasks), batch_size), desc='Processing batches'):
+                batch = run_tasks[i:i+batch_size]
+                results = [self.load_run(alg, run) for alg, run in batch]
+                
+                for preds_local in results:
+                    for ckpt_id, preds in preds_local.items():
+                        self.preds[current_index] = preds.to(self.device)
+                        ckpt_file.write(f"{ckpt_id}\n")
+                        self.ckpts.append(ckpt_id)
+                        current_index += 1
 
-            # Process all (alg, run) pairs concurrently and save in chunks
-            with ProcessPoolExecutor() as executor:
-                current_index = 0  # Incremental counter to track the position in preds_memmap
-                results = []
-
-                for i, preds_local in enumerate(tqdm(executor.map(self.load_run, algs_list, runs_list), total=total_runs, desc='Processing runs')):
-                    results.append(preds_local)
-                    
-                    # Save every `save_chunk_size` runs
-                    if (i + 1) % save_chunk_size == 0 or (i + 1) == total_runs:
-                        # Save the chunk
-                        for preds_local in results:
-                            for ckpt_id, preds in preds_local.items():
-                                preds_memmap[current_index] = preds  # Write to the current index
-                                ckpt_file.write(f"{ckpt_id}\n")  # Write the ckpt_id in order
-                                self.ckpts.append(ckpt_id)  # Maintain in-memory list
-                                current_index += 1  # Increment the counter
-
-                        results = []  # Clear results to free memory
-
-        print("Saved all runs to", self.dat_file)
-        # print("Saved checkpoint IDs to", self.ckpt_file)
         print(f"Saved {len(self.ckpts)} checkpoints to {self.ckpt_file}")
-
-        # Load memmap data into self.preds for later use
-        self.preds = preds_memmap
-
+        torch.save(self.preds, self.dat_file)
 
     def load_ckpts(self):
         """
@@ -148,11 +130,5 @@ class DomainNet126:
         return self.ckpts
 
     def load_preds(self):
-        """
-        Load the predictions from the saved memmap file into self.preds.
-        """
-        total_runs = len(self.load_ckpts())  # Assume you saved total_runs somewhere or infer it
-        N = 7126 # TODO: Adjust this by task
-        run_shape = (total_runs, N, 126)
-        self.preds = np.memmap(self.dat_file, dtype=np.float32, mode='r', shape=run_shape)
+        self.preds = torch.load(self.dat_file, map_location=self.device)
         return self.preds
