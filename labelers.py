@@ -25,20 +25,26 @@ class Oracle:
         H, N, C = all_preds.shape
 
         if loss_fn is not None:
-            print("Computing losses...")
             self.true_losses = []
-            # Compute losses for all models at once
-            ce_losses = loss_fn(all_preds.reshape(-1, C), self.labels.repeat(H), reduction='none')
-            self.true_losses = ce_losses.reshape(H, -1).mean(dim=1).tolist()
-            print("Losses computed")
-            
+            batch_size = 100  # Adjust this value based on your GPU memory
+            for i in range(0, H, batch_size):
+                batch_end = min(i + batch_size, H)
+                batch_preds = all_preds[i:batch_end]
+                batch_labels = self.labels.repeat(batch_end - i)
+                ce_losses = loss_fn(batch_preds.reshape(-1, C), batch_labels, reduction='none')
+                self.true_losses.extend(ce_losses.reshape(batch_end - i, -1).mean(dim=1).tolist())
+                torch.cuda.empty_cache()  # Clear GPU cache after each batch
+
         if accuracy_fn is not None:
-            print("Computing accuracies..."
             self.true_accs = []
-            # Compute accuracies for all models at once
-            softmax_preds = torch.softmax(all_preds, dim=-1)
-            self.true_accs = accuracy_fn(softmax_preds.reshape(-1, C), self.labels.repeat(H)).reshape(H).tolist()
-            print("Accuracies computed")
+            batch_size = 100  # Adjust this value based on your GPU memory
+            for i in range(0, H, batch_size):
+                batch_end = min(i + batch_size, H)
+                batch_preds = torch.softmax(all_preds[i:batch_end], dim=-1)
+                batch_labels = self.labels.repeat(batch_end - i)
+                batch_acc = accuracy_fn(batch_preds.reshape(-1, C), batch_labels)
+                self.true_accs.extend(batch_acc.repeat(batch_end - i).tolist())
+                torch.cuda.empty_cache()  # Clear GPU cache after each batch
 
     def __call__(self, idx):
         return self.labels[idx].item()

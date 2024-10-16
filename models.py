@@ -2,23 +2,34 @@ import torch
 from torch.distributions import Normal
 
 class AMS:
-    def __init__(self, surrogate, loss_fn, prune_thresh=0.05):
+    def __init__(self, surrogate, loss_fn, prune_thresh=0.05, batch_size=1000):
         self.surrogate = surrogate
         self.loss_fn = loss_fn
         self.prune_thresh = prune_thresh
         self.device = surrogate.device
+        self.batch_size = batch_size
 
     def _losses(self):
         all_preds_tensor = self.surrogate.all_preds
         H, N, C = all_preds_tensor.shape
         surrogate_preds_tensor = self.surrogate.get_preds()
 
-        loss = self.loss_fn(
-            all_preds_tensor.view(H * N, C), 
-            surrogate_preds_tensor.repeat(H, 1), 
-            reduction='none'
-        ).view(H, N)
-        return loss
+        losses = torch.zeros(H, N, device=self.device)
+
+        for i in range(0, N, self.batch_size):
+            batch_end = min(i + self.batch_size, N)
+            batch_preds = all_preds_tensor[:, i:batch_end, :].reshape(-1, C)
+            batch_surrogate = surrogate_preds_tensor[i:batch_end].repeat(H, 1)
+
+            batch_loss = self.loss_fn(
+                batch_preds,
+                batch_surrogate,
+                reduction='none'
+            ).view(H, -1)
+
+            losses[:, i:batch_end] = batch_loss
+
+        return losses
     
     def _get_loss_mean_variance(self, loss):
         surrogate_mu = loss.mean(dim=1)

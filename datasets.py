@@ -130,5 +130,10 @@ class DomainNet126:
         return self.ckpts
 
     def load_preds(self):
-        self.preds = torch.load(self.dat_file, map_location=self.device)
+        try:
+            self.preds = torch.load(self.dat_file, map_location=self.device, weights_only=True)
+        except RuntimeError:
+            # If loading with weights_only=True fails, fall back to the old method
+            print("Warning: Unable to load with weights_only=True. Falling back to default loading method.")
+            self.preds = torch.load(self.dat_file, map_location=self.device)
         return self.preds

@@ -34,7 +34,7 @@ def seed_all(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def compute_LUREs(all_preds, d_l_idxs, d_l_ys, qm, loss_fn):
+def compute_LUREs(all_preds, d_l_idxs, d_l_ys, qm, loss_fn, device, batch_size=100):
     """
         all_preds: shape (num_models, num_data_points, num_classes)
         d_l_idxs: labeled indices, list of length M
@@ -42,20 +42,30 @@ def compute_LUREs(all_preds, d_l_idxs, d_l_ys, qm, loss_fn):
         qm: sampling probability for all points in d_l_idxs, also length M
     """
     H, N, C = all_preds.shape
+    M = len(d_l_idxs)
     
-    # get preds for labeled points only
-    all_preds = all_preds[:, d_l_idxs, :]
-    _, M, _ = all_preds.shape
-    losses = []
+    # Move all data to the specified device
+    all_preds = all_preds[:, d_l_idxs, :].to(device)
+    d_l_ys = torch.tensor(d_l_ys, device=device)
+    qm = torch.tensor(qm, device=device)
 
-    for h in range(H):
-        loss = loss_fn(torch.tensor(all_preds[h]), torch.tensor(d_l_ys), reduction='none')
-        for m in range(M):
-            v_m = 1 + (N - M) / (N - m) * ( 1 / ( (N - m + 1) * qm[m] ) - 1)
-            loss[m] *= v_m
-        losses.append(loss.sum() / M)
+    losses = torch.zeros(H, device=device)
 
-    return losses
+    for i in range(0, M, batch_size):
+        batch_end = min(i + batch_size, M)
+        batch_preds = all_preds[:, i:batch_end, :]
+        batch_labels = d_l_ys[i:batch_end]
+        batch_qm = qm[i:batch_end]
+
+        batch_losses = loss_fn(batch_preds.reshape(-1, C), batch_labels.repeat(H), reduction='none').view(H, -1)
+
+        for m in range(batch_end - i):
+            v_m = 1 + (N - M) / (N - (i + m)) * (1 / ((N - (i + m) + 1) * batch_qm[m]) - 1)
+            batch_losses[:, m] *= v_m
+
+        losses += batch_losses.sum(dim=1)
+
+    return (losses / M).tolist()
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -80,10 +90,13 @@ def main():
     experiment = Experiment(
         project_name="ams",
         workspace=os.environ["COMET_WORKSPACE"],
-        api_key=os.environ["COMET_API_KEY"]
+        api_key=os.environ["COMET_API_KEY"],
+        log_env_details=False
     )
     experiment.set_name("-".join([f'{k}={str(v)}' for k,v in vars(args).items()]))
     experiment.log_parameters(args)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load prediction results of all hypotheses
     dataset = DATASETS[args.dataset](args.task)
@@ -91,7 +104,7 @@ def main():
 
     # for now, dataset-specific loss functions
     loss_fn = LOSS_FNS[args.dataset]
-    accuracy_fn = ACCURACY_FNS[args.dataset]
+    accuracy_fn = ACCURACY_FNS[args.dataset].to(dataset.device)
 
     # model selection algorithm
     if args.algorithm == 'ours':
@@ -142,7 +155,7 @@ def main():
         d_l_ys.append(d_m_y)
 
         # update loss estimates for all models
-        all_LURE_estimates = compute_LUREs(dataset.preds, d_l_idxs, d_l_ys, qms, loss_fn)
+        all_LURE_estimates = compute_LUREs(dataset.preds, d_l_idxs, d_l_ys, qms, loss_fn, device)
 
         # do model selection
         best_model_idx_pred = np.argmin(np.array(all_LURE_estimates))
