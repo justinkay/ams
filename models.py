@@ -21,13 +21,11 @@ class AMS:
             batch_end = min(i + self.batch_size, N)
             batch_preds = all_preds_tensor[:, i:batch_end, :].reshape(-1, C)
             batch_surrogate = surrogate_preds_tensor[i:batch_end].repeat(H, 1)
-
             batch_loss = self.loss_fn(
                 batch_preds,
                 batch_surrogate,
                 reduction='none'
             ).view(H, -1)
-
             losses[:, i:batch_end] = batch_loss
 
         return losses

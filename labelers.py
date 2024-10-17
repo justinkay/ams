@@ -38,8 +38,8 @@ class Oracle:
             batch_end = min(i + batch_size, H)
             batch_preds = preds[i:batch_end]
             batch_labels = self.labels.repeat(batch_end - i)
-            ce_losses = self.loss_fn(batch_preds.reshape(-1, C), batch_labels, reduction='none')
-            losses.extend(ce_losses.reshape(batch_end - i, -1).mean(dim=1).tolist())
+            batch_losses = self.loss_fn(batch_preds.reshape(-1, C), batch_labels, reduction='none')
+            losses.extend(batch_losses.reshape(batch_end - i, -1).mean(dim=1).tolist())
             torch.cuda.empty_cache()  # Clear GPU cache after each batch
         return losses
 

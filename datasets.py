@@ -7,6 +7,7 @@ import torch
 import h5py
 import logging
 import contextlib
+import random
 
 
 class DomainNet126:
@@ -77,11 +78,12 @@ class DomainNet126:
 
         return run_tasks
 
-    def get_total_run_shape(self):
+    def get_total_run_shape(self, run_tasks):
         """
-        Determine the total run shape by iterating through all HDF5 files.
+        Determine the total run shape by iterating through the provided (subsampled) run tasks.
+        Args:
+            run_tasks: List of (alg, run) pairs that represent the subsampled runs.
         """
-        run_tasks = self.get_run_tasks()
         total_checkpoints = 0
         samples = 0
         classes = 0
@@ -92,14 +94,14 @@ class DomainNet126:
                 with h5py.File(hdf5_file_path, "r") as f:
                     epochs = f.keys()
                     total_checkpoints += len(epochs)
-                    
+
                     # Get samples and classes from the first epoch
                     first_epoch = next(iter(epochs))
                     if self.use_target_val:
                         logits = f[first_epoch]['inference']['target_val']['logits']
                     else:
                         logits = f[first_epoch]['inference']['target_train']['logits']
-                    
+
                     if samples == 0:  # Only set these once
                         samples, classes = logits.shape
 
@@ -114,6 +116,11 @@ class DomainNet126:
         return (total_checkpoints, samples, classes)
 
     def load_runs(self, subsample_pct=100, batch_size=2, force_reload=False, num_workers=8, write=True):
+        if subsample_pct < 100:
+            print("Disabling write and enabling force_reload because we are subsampling.")
+            write = False
+            force_reload = True
+        
         if not force_reload and os.path.exists(self.dat_file) and os.path.exists(self.ckpt_file):
             print("Found existing files. Loading from disk.")
             start_time = time.time()
@@ -125,7 +132,12 @@ class DomainNet126:
             return
 
         run_tasks = self.get_run_tasks()
-        run_shape = self.get_total_run_shape()
+        if subsample_pct < 100:
+            num_samples = int(len(run_tasks) * (subsample_pct / 100))
+            run_tasks = random.sample(run_tasks, num_samples)
+            print(f"Subsampled {num_samples} out of {len(run_tasks)} total runs ({subsample_pct}%)")
+
+        run_shape = self.get_total_run_shape(run_tasks)
         print(f"Total run shape: {run_shape}")
 
         self.preds = torch.empty(run_shape, dtype=torch.float32, device=self.device)
@@ -157,10 +169,5 @@ class DomainNet126:
         return self.ckpts
 
     def load_preds(self):
-        # try:
         self.preds = torch.load(self.dat_file, map_location=self.device, weights_only=False)
-        # except RuntimeError:
-        #     # If loading with weights_only=True fails, fall back to the old method
-        #     print("Warning: Unable to load with weights_only=True. Falling back to default loading method.")
-        #     self.preds = torch.load(self.dat_file, map_location=self.device)
         return self.preds

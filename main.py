@@ -17,8 +17,22 @@ DATASETS = {
     'domainnet126': datasets.DomainNet126,
 }
 
+def accuracy_loss(preds, labels, **kwargs):
+    """Gets non-reduced accuracy, and handles whether we are working with scores or integer labels."""
+    if len(labels.shape) > 1:
+        argmaxed_preds = torch.argmax(preds, dim=-1)
+        argmaxed_labels = torch.argmax(labels, dim=-1)
+        accs = (argmaxed_preds == argmaxed_labels).float()
+    else:
+        argmaxed = torch.argmax(preds, dim=-1)
+        accs = (argmaxed == labels).float()
+
+    # make it a loss
+    return 1 - accs
+
 LOSS_FNS = {
     'ce': cross_entropy,
+    'acc': accuracy_loss
 }
 
 LABELERS = {
@@ -117,10 +131,7 @@ def main():
 
     # loss and accuracy functions
     accuracy_fn = ACCURACY_FNS[args.dataset].to(dataset.device)
-    if args.loss == 'acc':
-        loss_fn = accuracy_fn
-    else:
-        loss_fn = LOSS_FNS[args.loss]
+    loss_fn = LOSS_FNS[args.loss]
 
     # model selection algorithm
     if args.algorithm == 'ours':
@@ -199,8 +210,9 @@ def main():
         elif args.ensemble == 'naive':
             ensemble_preds = surrogate.get_preds()
         if args.ensemble != 'none':
+            N, C = ensemble_preds.shape
             ensemble_loss = loss_fn(ensemble_preds, oracle.labels)
-            ensemble_acc = accuracy_fn(ensemble_preds, oracle.labels)
+            ensemble_acc = accuracy_fn(ensemble_preds.reshape(-1, C), oracle.labels)
             experiment.log_metric("Ensemble loss", ensemble_loss, step=m)
             experiment.log_metric("Ensemble accuracy", ensemble_acc, step=m)
 
