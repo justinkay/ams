@@ -2,7 +2,7 @@ from comet_ml import Experiment
 import argparse
 import datasets
 import labelers
-from surrogates import Ensemble
+from surrogates import Ensemble, WeightedEnsemble
 from models import IID, AMS
 import random
 import numpy as np
@@ -18,7 +18,7 @@ DATASETS = {
 }
 
 LOSS_FNS = {
-    'domainnet126': cross_entropy,
+    'ce': cross_entropy,
 }
 
 LABELERS = {
@@ -75,11 +75,10 @@ def parse_args():
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--algorithm", help="{ 'iid', 'ours', 'ours-sfo', ... }", default="ours")
     parser.add_argument("--subsample_pct", type=int, help="Percentage of runs to analyze",  default=100)
-    parser.add_argument("--seed", default=0)
+    parser.add_argument("--loss", default="ce", help="{ce, acc, ...}")
+    parser.add_argument("--ensemble", default="naive", help="{'naive', 'weighted', ...}")
 
-    # other potential options:
-    # loss fn (cross-entropy vs. accuracy, e.g.)
-    # --no-prune; other ablation studies
+    parser.add_argument("--seed", type=int, default=0)
 
     return parser.parse_args()
 
@@ -87,6 +86,10 @@ def main():
     args = parse_args()
     seed_all(args.seed)
     
+    # modify args as needed
+    if args.algorithm == 'iid':
+        args.ensemble = 'none'
+
     experiment = Experiment(
         project_name="ams",
         workspace=os.environ["COMET_WORKSPACE"],
@@ -102,13 +105,21 @@ def main():
     dataset = DATASETS[args.dataset](args.task)
     dataset.load_runs(subsample_pct=args.subsample_pct)
 
-    # for now, dataset-specific loss functions
-    loss_fn = LOSS_FNS[args.dataset]
+    # loss and accuracy functions
     accuracy_fn = ACCURACY_FNS[args.dataset].to(dataset.device)
+    if args.loss == 'acc':
+        loss_fn = accuracy_fn
+    else:
+        loss_fn = LOSS_FNS[args.loss]
 
     # model selection algorithm
     if args.algorithm == 'ours':
-        surrogate = Ensemble(dataset.preds)
+        if args.ensemble == 'naive':
+            surrogate = Ensemble(dataset.preds)
+        elif args.ensemble == 'weighted':
+            surrogate = WeightedEnsemble(dataset.preds)
+        elif args.ensemble != 'none':
+            raise NotImplementedError("Ensemble" + args.ensemble + "not supported.")
         model = AMS(surrogate, loss_fn)
     elif args.algorithm == 'iid':
         model = IID()
@@ -172,9 +183,8 @@ def main():
         experiment.log_metric("Cumulative regret (loss)", cumulative_regret_loss, step=m)
         experiment.log_metric("Cumulative regret (acc)", cumulative_regret_acc, step=m)
 
-        # log other stuff
-        # P(h=h*)
-        # etc...
+        # get ensemble accuracy at this time step
+        
 
 if __name__ == "__main__":
     main()

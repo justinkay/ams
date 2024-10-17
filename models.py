@@ -1,3 +1,4 @@
+import random
 import torch
 from torch.distributions import Normal
 
@@ -66,5 +67,10 @@ class AMS:
         return d_u_idxs[choice], qs[choice].item()
 
 class IID:
-    pass
+    def __init__(self):
+        pass
 
+    def do_step(self, d_u_idxs):
+        choice = random.randint(0, len(d_u_idxs) - 1)
+        q = 1.0 / len(d_u_idxs)
+        return d_u_idxs[choice], q
