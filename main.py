@@ -18,7 +18,7 @@ DATASETS = {
 }
 
 def accuracy_loss(preds, labels, **kwargs):
-    """Gets non-reduced accuracy, and handles whether we are working with scores or integer labels."""
+    """Get 1 - accuracy (a loss), nonreduced. Handles whether we are working with scores or integer labels."""
     if len(labels.shape) > 1:
         argmaxed_preds = torch.argmax(preds, dim=-1)
         argmaxed_labels = torch.argmax(labels, dim=-1)

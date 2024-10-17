@@ -10,10 +10,13 @@ class AMS:
         self.device = surrogate.device
         self.batch_size = batch_size
 
+        # initial belief over hypotheses
+        self.last_p_h = torch.ones((surrogate.all_preds.shape[0],), device=self.device).uniform_()
+
     def _losses(self):
         all_preds_tensor = self.surrogate.all_preds
         H, N, C = all_preds_tensor.shape
-        surrogate_preds_tensor = self.surrogate.get_preds()
+        surrogate_preds_tensor = self.surrogate.get_preds(weights=self.last_p_h)
 
         losses = torch.zeros(H, N, device=self.device)
 
