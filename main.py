@@ -211,7 +211,7 @@ def main():
             ensemble_preds = surrogate.get_preds()
         if args.ensemble != 'none':
             N, C = ensemble_preds.shape
-            ensemble_loss = loss_fn(ensemble_preds, oracle.labels)
+            ensemble_loss = loss_fn(ensemble_preds.reshape(-1, C), oracle.labels).mean() # TODO is this the right way to mean()
             ensemble_acc = accuracy_fn(ensemble_preds.reshape(-1, C), oracle.labels)
             experiment.log_metric("Ensemble loss", ensemble_loss, step=m)
             experiment.log_metric("Ensemble accuracy", ensemble_acc, step=m)
