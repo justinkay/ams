@@ -2,11 +2,11 @@ import os
 import glob
 import numpy as np
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
-import random
+import time
 import torch
 import h5py
 import logging
+import contextlib
 
 
 class DomainNet126:
@@ -62,21 +62,7 @@ class DomainNet126:
 
         return val_preds_local
 
-
-    def load_runs(self, subsample_pct=100, batch_size=100, force_reload=False):
-        """
-        Load predictions into self.preds and save them incrementally to a .dat file.
-        Args:
-            force_reload: If True, re-generate .dat and checkpoint files. If False, attempt to load existing files.
-        """
-        # Check if the .dat and ckpt files already exist and load them if force_reload is False
-        if not force_reload and os.path.exists(self.dat_file) and os.path.exists(self.ckpt_file):
-            print("Found existing files. Loading from disk.")
-            self.load_ckpts()
-            self.load_preds()
-            print(f"Loaded {len(self.ckpts)} checkpoints from {self.ckpt_file}")
-            return
-
+    def get_run_tasks(self):
         # All UDA algorithms tested
         algs = [d for d in os.listdir(self.location) if d != 'slurm' and not d.startswith('.')]
 
@@ -89,37 +75,78 @@ class DomainNet126:
             # Add all the (alg, run) pairs to the task list
             run_tasks.extend((alg, run) for run in alg_runs)
 
-        # If subsample_pct is less than 100, subsample from the entire run_tasks list
-        if subsample_pct < 100:
-            n_subsample = max(1, int(len(run_tasks) * (subsample_pct / 100.0)))
-            run_tasks = random.sample(run_tasks, n_subsample)
+        return run_tasks
 
-        # Split tasks into two lists: one for algs, and one for runs
-        algs_list, runs_list = zip(*run_tasks)
-        ckpts_per_run = 20 # TODO get this dynamically
+    def get_total_run_shape(self):
+        """
+        Determine the total run shape by iterating through all HDF5 files.
+        """
+        run_tasks = self.get_run_tasks()
+        total_checkpoints = 0
+        samples = 0
+        classes = 0
 
-        # Initialize tensor to save to the file
-        total_runs = len(run_tasks)
-        run_shape = (total_runs*ckpts_per_run, 7126, 126)
+        for alg, run in tqdm(run_tasks, desc="Calculating total run shape"):
+            hdf5_file_path = os.path.join(run, 'features/features.hdf5')
+            try:
+                with h5py.File(hdf5_file_path, "r") as f:
+                    epochs = f.keys()
+                    total_checkpoints += len(epochs)
+                    
+                    # Get samples and classes from the first epoch
+                    first_epoch = next(iter(epochs))
+                    if self.use_target_val:
+                        logits = f[first_epoch]['inference']['target_val']['logits']
+                    else:
+                        logits = f[first_epoch]['inference']['target_train']['logits']
+                    
+                    if samples == 0:  # Only set these once
+                        samples, classes = logits.shape
+
+            except Exception as e:
+                logging.warning(f"Couldn't read {hdf5_file_path}: {e}")
+                continue
+
+        if total_checkpoints == 0 or samples == 0 or classes == 0:
+            logging.error("Failed to determine run shape. Using default values.")
+            return (1000, 7126, 126)  # Default values
+
+        return (total_checkpoints, samples, classes)
+
+    def load_runs(self, subsample_pct=100, batch_size=2, force_reload=False, num_workers=8, write=True):
+        if not force_reload and os.path.exists(self.dat_file) and os.path.exists(self.ckpt_file):
+            print("Found existing files. Loading from disk.")
+            start_time = time.time()
+            self.load_ckpts()
+            self.load_preds()
+            elapsed_time = time.time() - start_time
+            readable_time = time.strftime("%H:%M:%S", time.gmtime(elapsed_time))
+            print(f"Loaded {len(self.ckpts)} checkpoints from {self.ckpt_file} in {readable_time}")
+            return
+
+        run_tasks = self.get_run_tasks()
+        run_shape = self.get_total_run_shape()
+        print(f"Total run shape: {run_shape}")
+
         self.preds = torch.empty(run_shape, dtype=torch.float32, device=self.device)
+        print(f"Loading predictions from {len(run_tasks)} runs from HDF5 files...")
 
-        print(f"Loading predictions from {total_runs} runs from HDF5 files...")
-
-        with open(self.ckpt_file, 'w') as ckpt_file:
+        with open(self.ckpt_file, 'w') if write else contextlib.nullcontext() as ckpt_file:
             current_index = 0
-            for i in tqdm(range(0, len(run_tasks), batch_size), desc='Processing batches'):
-                batch = run_tasks[i:i+batch_size]
-                results = [self.load_run(alg, run) for alg, run in batch]
-                
-                for preds_local in results:
-                    for ckpt_id, preds in preds_local.items():
-                        self.preds[current_index] = preds.to(self.device)
+            for task in tqdm(run_tasks):
+                preds_local = self.load_run(*task)
+                for ckpt_id, preds in preds_local.items():
+                    self.preds[current_index] = preds.to(self.device)
+                    self.ckpts.append(ckpt_id)
+                    current_index += 1
+                    if write:
                         ckpt_file.write(f"{ckpt_id}\n")
-                        self.ckpts.append(ckpt_id)
-                        current_index += 1
 
-        print(f"Saved {len(self.ckpts)} checkpoints to {self.ckpt_file}")
-        torch.save(self.preds, self.dat_file)
+        if write:
+            print(f"Saved {len(self.ckpts)} checkpoints to {self.ckpt_file}")
+            print("Saving .pt file...")
+            torch.save(self.preds, self.dat_file, pickle_protocol=4) # pickle protocol helps with OOM
+            print("Saved.")
 
     def load_ckpts(self):
         """
@@ -130,10 +157,10 @@ class DomainNet126:
         return self.ckpts
 
     def load_preds(self):
-        try:
-            self.preds = torch.load(self.dat_file, map_location=self.device, weights_only=True)
-        except RuntimeError:
-            # If loading with weights_only=True fails, fall back to the old method
-            print("Warning: Unable to load with weights_only=True. Falling back to default loading method.")
-            self.preds = torch.load(self.dat_file, map_location=self.device)
+        # try:
+        self.preds = torch.load(self.dat_file, map_location=self.device, weights_only=False)
+        # except RuntimeError:
+        #     # If loading with weights_only=True fails, fall back to the old method
+        #     print("Warning: Unable to load with weights_only=True. Falling back to default loading method.")
+        #     self.preds = torch.load(self.dat_file, map_location=self.device)
         return self.preds

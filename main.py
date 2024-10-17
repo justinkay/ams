@@ -33,6 +33,10 @@ def seed_all(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # multi-GPU
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def compute_LUREs(all_preds, d_l_idxs, d_l_ys, qm, loss_fn, device, batch_size=100):
     """
@@ -74,9 +78,12 @@ def parse_args():
     parser.add_argument("--labeler", help="{ 'oracle', 'user' }", default="oracle")
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--algorithm", help="{ 'iid', 'ours', 'ours-sfo', ... }", default="ours")
-    parser.add_argument("--subsample_pct", type=int, help="Percentage of runs to analyze",  default=100)
-    parser.add_argument("--loss", default="ce", help="{ce, acc, ...}")
-    parser.add_argument("--ensemble", default="naive", help="{'naive', 'weighted', ...}")
+    parser.add_argument("--subsample-pct", type=int, help="Percentage of runs to analyze",  default=100)
+    parser.add_argument("--loss", default="ce", help="{ 'ce', 'acc', ... }")
+    parser.add_argument("--ensemble", default="naive", help="{ 'naive', 'weighted', ... }")
+    parser.add_argument("--force-reload", action='store_true', help="Load directly from feature files rather than large dat file.")
+    parser.add_argument("--no-write", action='store_true', help="Don't write preds to an intermediate .dat or .pt file.")
+    parser.add_argument("--no-comet", action='store_true', help="Disable logging with Comet ML")
 
     parser.add_argument("--seed", type=int, default=0)
 
@@ -94,16 +101,19 @@ def main():
         project_name="ams",
         workspace=os.environ["COMET_WORKSPACE"],
         api_key=os.environ["COMET_API_KEY"],
-        log_env_details=False
+        log_env_details=False,
+        disabled = args.no_comet
     )
     experiment.set_name("-".join([f'{k}={str(v)}' for k,v in vars(args).items()]))
     experiment.log_parameters(args)
+    experiment.log_parameter("algorithm-detail", "-".join([args.algorithm, args.ensemble, args.loss]))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load prediction results of all hypotheses
     dataset = DATASETS[args.dataset](args.task)
-    dataset.load_runs(subsample_pct=args.subsample_pct)
+    dataset.load_runs(subsample_pct=args.subsample_pct, force_reload=args.force_reload, write=not args.no_write)
+    experiment.log_parameter("num_runs", len(dataset.get_run_tasks()))
 
     # loss and accuracy functions
     accuracy_fn = ACCURACY_FNS[args.dataset].to(dataset.device)
@@ -184,7 +194,15 @@ def main():
         experiment.log_metric("Cumulative regret (acc)", cumulative_regret_acc, step=m)
 
         # get ensemble accuracy at this time step
-        
+        if args.ensemble == 'weighted':
+            ensemble_preds = surrogate.get_preds(weights=model.last_p_h)
+        elif args.ensemble == 'naive':
+            ensemble_preds = surrogate.get_preds()
+        if args.ensemble != 'none':
+            ensemble_loss = loss_fn(ensemble_preds, oracle.labels)
+            ensemble_acc = accuracy_fn(ensemble_preds, oracle.labels)
+            experiment.log_metric("Ensemble loss", ensemble_loss, step=m)
+            experiment.log_metric("Ensemble accuracy", ensemble_acc, step=m)
 
 if __name__ == "__main__":
     main()

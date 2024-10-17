@@ -5,7 +5,6 @@ from scipy.special import softmax
 
 
 class Oracle:
-    
     def __init__(self, dataset, base_dir="../powerful-benchmarker/datasets/",
                  loss_fn=None, accuracy_fn=None):
         if isinstance(dataset, DomainNet126):
@@ -21,30 +20,41 @@ class Oracle:
             self.labels = np.array([ int(s.split(" ")[-1].replace("\n","")) for s in f.readlines()])
             self.labels = torch.tensor(self.labels, device=dataset.device)
 
-        all_preds = dataset.preds
-        H, N, C = all_preds.shape
+        self.loss_fn = loss_fn
+        self.accuracy_fn = accuracy_fn
+        self.device = dataset.device
 
         if loss_fn is not None:
-            self.true_losses = []
-            batch_size = 100  # Adjust this value based on your GPU memory
-            for i in range(0, H, batch_size):
-                batch_end = min(i + batch_size, H)
-                batch_preds = all_preds[i:batch_end]
-                batch_labels = self.labels.repeat(batch_end - i)
-                ce_losses = loss_fn(batch_preds.reshape(-1, C), batch_labels, reduction='none')
-                self.true_losses.extend(ce_losses.reshape(batch_end - i, -1).mean(dim=1).tolist())
-                torch.cuda.empty_cache()  # Clear GPU cache after each batch
-
+            self.true_losses = self.compute_losses(dataset.preds)
+        
         if accuracy_fn is not None:
-            self.true_accs = []
-            batch_size = 100  # Adjust this value based on your GPU memory
-            for i in range(0, H, batch_size):
-                batch_end = min(i + batch_size, H)
-                batch_preds = torch.softmax(all_preds[i:batch_end], dim=-1)
-                batch_labels = self.labels.repeat(batch_end - i)
-                batch_acc = accuracy_fn(batch_preds.reshape(-1, C), batch_labels)
-                self.true_accs.extend(batch_acc.repeat(batch_end - i).tolist())
-                torch.cuda.empty_cache()  # Clear GPU cache after each batch
+            self.true_accs = self.compute_accuracies(dataset.preds)
+
+    def compute_losses(self, preds):
+        H, N, C = preds.shape
+        losses = []
+        batch_size = 100  # Adjust this value based on your GPU memory
+        for i in range(0, H, batch_size):
+            batch_end = min(i + batch_size, H)
+            batch_preds = preds[i:batch_end]
+            batch_labels = self.labels.repeat(batch_end - i)
+            ce_losses = self.loss_fn(batch_preds.reshape(-1, C), batch_labels, reduction='none')
+            losses.extend(ce_losses.reshape(batch_end - i, -1).mean(dim=1).tolist())
+            torch.cuda.empty_cache()  # Clear GPU cache after each batch
+        return losses
+
+    def compute_accuracies(self, preds):
+        H, N, C = preds.shape
+        accuracies = []
+        batch_size = 100  # Adjust this value based on your GPU memory
+        for i in range(0, H, batch_size):
+            batch_end = min(i + batch_size, H)
+            batch_preds = torch.softmax(preds[i:batch_end], dim=-1)
+            batch_labels = self.labels.repeat(batch_end - i)
+            batch_acc = self.accuracy_fn(batch_preds.reshape(-1, C), batch_labels)
+            accuracies.extend(batch_acc.repeat(batch_end - i).tolist())
+            torch.cuda.empty_cache()  # Clear GPU cache after each batch
+        return accuracies
 
     def __call__(self, idx):
         return self.labels[idx].item()
