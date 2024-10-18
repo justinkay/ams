@@ -37,7 +37,8 @@ class Oracle:
         for i in range(0, H, batch_size):
             batch_end = min(i + batch_size, H)
             batch_preds = preds[i:batch_end]
-            batch_labels = self.labels 
+            batch_labels = self.labels
+            print("batch labels in compute_losses", batch_labels)
             batch_losses = self.loss_fn(batch_preds.view(-1, C), batch_labels.repeat(batch_end - i), reduction='none')
             batch_losses = batch_losses.view(batch_end - i, N).mean(dim=1) # Compute mean loss for each model
             losses.extend(batch_losses.tolist())

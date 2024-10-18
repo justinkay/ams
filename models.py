@@ -12,7 +12,6 @@ class AMS:
 
         # initial belief over hypotheses
         self.last_p_h = torch.ones((surrogate.all_preds.shape[0],), device=self.device) / surrogate.all_preds.shape[0]
-        print("initializing ph to", self.last_p_h)
 
     def _losses(self):
         all_preds_tensor = self.surrogate.all_preds
@@ -22,15 +21,24 @@ class AMS:
 
         losses = torch.zeros(H, N, device=self.device)
 
+        # get losses between our preds and surrogate preds
+        # batch up the data to reduce GPU memory load -- compute all model losses on self.batch_size data points at a time
         for i in range(0, N, self.batch_size):
             batch_end = min(i + self.batch_size, N)
             batch_preds = all_preds_tensor[:, i:batch_end, :].reshape(-1, C)
-            batch_surrogate = surrogate_preds_tensor[i:batch_end].repeat(H, 1)
-            batch_loss = self.loss_fn(
+            batch_surrogate = torch.softmax(surrogate_preds_tensor[i:batch_end], dim=-1).repeat(H, 1) # ground truth on these points is same for every model
+            batch_loss = self.loss_fn( 
                 batch_preds,
-                batch_surrogate,
+                batch_surrogate, # TODO the softmax here may not generalize to other tasks/losses
                 reduction='none'
             ).view(H, -1)
+
+            if i == 0:
+                print("iter", i)
+                print("batch_preds", batch_preds.shape, batch_preds)
+                print("batch_surrogate", batch_surrogate.shape, batch_surrogate)
+                print("batch_loss", batch_loss.shape, batch_loss)
+
             losses[:, i:batch_end] = batch_loss
 
         print("surrogate losses", losses.shape, losses)

@@ -1,6 +1,9 @@
 class Ensemble:
     def __init__(self, all_preds):
         self.all_preds = all_preds
+        
+        # let's ensure these are softmaxed
+
         self.device = all_preds.device
         H, N, C = all_preds.shape
 
