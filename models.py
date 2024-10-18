@@ -11,12 +11,14 @@ class AMS:
         self.batch_size = batch_size
 
         # initial belief over hypotheses
-        self.last_p_h = torch.ones((surrogate.all_preds.shape[0],), device=self.device).uniform_()
+        self.last_p_h = torch.ones((surrogate.all_preds.shape[0],), device=self.device) / surrogate.all_preds.shape[0]
+        print("initializing ph to", self.last_p_h)
 
     def _losses(self):
         all_preds_tensor = self.surrogate.all_preds
         H, N, C = all_preds_tensor.shape
         surrogate_preds_tensor = self.surrogate.get_preds(weights=self.last_p_h)
+        print("surrogate preds", surrogate_preds_tensor.shape, surrogate_preds_tensor)
 
         losses = torch.zeros(H, N, device=self.device)
 
@@ -30,6 +32,8 @@ class AMS:
                 reduction='none'
             ).view(H, -1)
             losses[:, i:batch_end] = batch_loss
+
+        print("surrogate losses", losses.shape, losses)
 
         return losses
     
@@ -50,8 +54,13 @@ class AMS:
         return self.last_p_h
 
     def do_step(self, d_u_idxs):
+        print("getting surrogate losses")
         loss = self._losses()
+
         surrogate_mu, surrogate_sigma = self._get_loss_mean_variance(loss)
+        print("surrogate_mu", surrogate_mu.shape, surrogate_mu)
+        print("surrogate_sigma", surrogate_sigma.shape, surrogate_sigma)
+
         p_h = self._compute_p_h(surrogate_mu, surrogate_sigma)
 
         weighted_losses = (p_h.unsqueeze(1) * loss).sum(dim=0)

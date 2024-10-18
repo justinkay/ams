@@ -16,7 +16,7 @@ class DomainNet126:
     """
 
     def __init__(self, task, base_dir="../powerful-benchmarker/experiments/", use_target_val=False, 
-                 dat_filename="predictions.pt", ckpt_filename="ckpts.txt"):
+                 dat_filename="predictions.pt", ckpt_filename="ckpts.txt", dataset_filter=None):
         """
         Args:
             task: should be {source}_{target}, e.g. "sketch_painting"
@@ -29,6 +29,7 @@ class DomainNet126:
         self.use_target_val = use_target_val
         self.task = task
 
+        self.dataset_filter = dataset_filter
         self.dat_file = os.path.join(self.location, dat_filename)
         self.ckpt_file = os.path.join(self.location, ckpt_filename)
         self.ckpts = []
@@ -66,6 +67,10 @@ class DomainNet126:
     def get_run_tasks(self):
         # All UDA algorithms tested
         algs = [d for d in os.listdir(self.location) if d != 'slurm' and not d.startswith('.')]
+
+        if self.dataset_filter is not None:
+            algs = self.dataset_filter.split(",")
+            print("Filtering UDA algorithms down to:", algs)
 
         # Prepare all (alg, run) pairs to process
         run_tasks = []
@@ -116,7 +121,7 @@ class DomainNet126:
         return (total_checkpoints, samples, classes)
 
     def load_runs(self, subsample_pct=100, batch_size=2, force_reload=False, num_workers=8, write=True):
-        if subsample_pct < 100:
+        if subsample_pct < 100 or self.dataset_filter is not None:
             print("Disabling write and enabling force_reload because we are subsampling.")
             write = False
             force_reload = True

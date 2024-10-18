@@ -88,6 +88,7 @@ def compute_LUREs(all_preds, d_l_idxs, d_l_ys, qm, loss_fn, device, batch_size=1
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", help="{ 'domainnet126', ... } ", required=True)
+    parser.add_argument("--dataset-filter", default=None, help="Comma separated, e.g. UDA algorithms to include.")
     parser.add_argument("--task", help="{ 'sketch_painting', ... }", default=None)
     parser.add_argument("--labeler", help="{ 'oracle', 'user' }", default="oracle")
     parser.add_argument("--iters", type=int, default=100)
@@ -125,7 +126,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # load prediction results of all hypotheses
-    dataset = DATASETS[args.dataset](args.task)
+    dataset = DATASETS[args.dataset](args.task, dataset_filter=args.dataset_filter)
     dataset.load_runs(subsample_pct=args.subsample_pct, force_reload=args.force_reload, write=not args.no_write)
     experiment.log_parameter("num_runs", len(dataset.get_run_tasks()))
 
@@ -160,6 +161,9 @@ def main():
     experiment.log_metric("Best loss", best_loss)
     experiment.log_metric("Best accuracy", best_acc)
     
+    print("min and max loss",min(oracle.true_losses),max(oracle.true_losses))
+    print("min and max accuracy", min(oracle.true_accs), max(oracle.true_accs))
+
     # labeled data point indices and labels - at first, no points are labeled
     d_l_idxs = [] 
     d_l_ys = []
@@ -177,7 +181,9 @@ def main():
     # active model selection loop
     for m in tqdm(range(args.iters)):
         # sample data point
+        print("doing step")
         d_m_idx, qm = model.do_step(d_u_idxs)
+
         d_l_idxs.append(d_m_idx)
         d_u_idxs.remove(d_m_idx)
         qms.append(qm)

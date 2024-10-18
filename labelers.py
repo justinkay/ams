@@ -37,10 +37,12 @@ class Oracle:
         for i in range(0, H, batch_size):
             batch_end = min(i + batch_size, H)
             batch_preds = preds[i:batch_end]
-            batch_labels = self.labels.repeat(batch_end - i)
-            batch_losses = self.loss_fn(batch_preds.reshape(-1, C), batch_labels, reduction='none')
-            losses.extend(batch_losses.reshape(batch_end - i, -1).mean(dim=1).tolist())
-            torch.cuda.empty_cache()  # Clear GPU cache after each batch
+            batch_labels = self.labels 
+            batch_losses = self.loss_fn(batch_preds.view(-1, C), batch_labels.repeat(batch_end - i), reduction='none')
+            batch_losses = batch_losses.view(batch_end - i, N).mean(dim=1) # Compute mean loss for each model
+            losses.extend(batch_losses.tolist())
+            torch.cuda.empty_cache()
+
         return losses
 
     def compute_accuracies(self, preds):
@@ -50,10 +52,13 @@ class Oracle:
         for i in range(0, H, batch_size):
             batch_end = min(i + batch_size, H)
             batch_preds = torch.softmax(preds[i:batch_end], dim=-1)
-            batch_labels = self.labels.repeat(batch_end - i)
-            batch_acc = self.accuracy_fn(batch_preds.reshape(-1, C), batch_labels)
-            accuracies.extend(batch_acc.repeat(batch_end - i).tolist())
-            torch.cuda.empty_cache()  # Clear GPU cache after each batch
+            batch_labels = self.labels
+            batch_acc = []
+            for j in range(batch_end - i):
+                acc = self.accuracy_fn(batch_preds[j], batch_labels)
+                batch_acc.append(acc)
+            accuracies.extend([acc.item() for acc in batch_acc])
+            torch.cuda.empty_cache()
         return accuracies
 
     def __call__(self, idx):
