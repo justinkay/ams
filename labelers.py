@@ -20,15 +20,16 @@ class Oracle:
             self.labels = np.array([ int(s.split(" ")[-1].replace("\n","")) for s in f.readlines()])
             self.labels = torch.tensor(self.labels, device=dataset.device)
 
+        self.dataset = dataset
         self.loss_fn = loss_fn
         self.accuracy_fn = accuracy_fn
         self.device = dataset.device
 
         if loss_fn is not None:
-            self.true_losses = self.compute_losses(dataset.preds)
+            self.true_losses = self.compute_losses(dataset.pred_logits)
         
         if accuracy_fn is not None:
-            self.true_accs = self.compute_accuracies(dataset.preds)
+            self.true_accs = self.compute_accuracies(dataset.pred_logits)
 
     def compute_losses(self, preds):
         H, N, C = preds.shape
@@ -43,6 +44,15 @@ class Oracle:
             batch_losses = batch_losses.view(batch_end - i, N).mean(dim=1) # Compute mean loss for each model
             losses.extend(batch_losses.tolist())
             torch.cuda.empty_cache()
+
+        # JK: for testing / understanding
+        data_point_losses = self.loss_fn(
+            preds.view(-1,C), 
+            self.labels.repeat(H),
+            reduction='none'
+        ).view(H, N).mean(dim=0)
+        print("data_point_losses", data_point_losses.shape, data_point_losses)
+        print("data_point_losses min, max, mean, std", data_point_losses.min(), data_point_losses.max(), data_point_losses.mean(), data_point_losses.std())
 
         return losses
 

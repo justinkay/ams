@@ -145,7 +145,7 @@ class DomainNet126:
         run_shape = self.get_total_run_shape(run_tasks)
         print(f"Total run shape: {run_shape}")
 
-        self.preds = torch.empty(run_shape, dtype=torch.float32, device=self.device)
+        self.pred_logits = torch.empty(run_shape, dtype=torch.float32, device=self.device)
         print(f"Loading predictions from {len(run_tasks)} runs from HDF5 files...")
 
         with open(self.ckpt_file, 'w') if write else contextlib.nullcontext() as ckpt_file:
@@ -153,7 +153,7 @@ class DomainNet126:
             for task in tqdm(run_tasks):
                 preds_local = self.load_run(*task)
                 for ckpt_id, preds in preds_local.items():
-                    self.preds[current_index] = preds.to(self.device)
+                    self.pred_logits[current_index] = preds.to(self.device)
                     self.ckpts.append(ckpt_id)
                     current_index += 1
                     if write:
@@ -162,7 +162,7 @@ class DomainNet126:
         if write:
             print(f"Saved {len(self.ckpts)} checkpoints to {self.ckpt_file}")
             print("Saving .pt file...")
-            torch.save(self.preds, self.dat_file, pickle_protocol=4) # pickle protocol helps with OOM
+            torch.save(self.pred_logits, self.dat_file, pickle_protocol=4) # pickle protocol helps with OOM
             print("Saved.")
 
     def load_ckpts(self):
@@ -174,5 +174,5 @@ class DomainNet126:
         return self.ckpts
 
     def load_preds(self):
-        self.preds = torch.load(self.dat_file, map_location=self.device, weights_only=False)
-        return self.preds
+        self.pred_logits = torch.load(self.dat_file, map_location=self.device, weights_only=False)
+        return self.pred_logits
