@@ -4,32 +4,35 @@ from torch.distributions import Normal
 
 
 class AMS:
-    def __init__(self, surrogate, loss_fn, batch_size=1000, use_p_h=True):
+    def __init__(self, surrogate, loss_fn, lure_estimator, batch_size=1000, use_p_h=True):
         self.surrogate = surrogate
         self.loss_fn = loss_fn
         self.device = surrogate.device
         self.batch_size = batch_size
-        self.use_p_h = use_p_h # utilize estimates of p(h=h*); if False, keep this as a uniform distribution
+        self.lure_estimator = lure_estimator
 
-        # initial belief over hypotheses
+        # Utilize estimates of p(h=h*); if False, keep this as a uniform distribution
+        self.use_p_h = use_p_h 
+
+        # Initial belief over hypotheses
         self.last_p_h = torch.ones((surrogate.pred_logits.shape[0],), device=self.device) / surrogate.pred_logits.shape[0]
 
     def _losses(self):
+        """
+        Return:
+            losses: shape (H, N) -- estimated losses for each hypothesis for each data point
+        """
         pred_logits = self.surrogate.pred_logits
         H, N, C = pred_logits.shape
-        print('h n c', H, N, C)
 
         # this is assumed to be softmaxed already
         surrogate_preds_tensor = self.surrogate.get_preds(weights=self.last_p_h)
-        print("surrogate preds tensor is softmaxed correctly?", surrogate_preds_tensor.shape, surrogate_preds_tensor.sum(dim=-1))
 
         losses = torch.zeros(H, N, device=self.device)
         for i in range(0, N, self.batch_size):
             batch_end = min(i + self.batch_size, N)
             batch_preds = pred_logits[:, i:batch_end, :].reshape(-1, C)
-            print("batch preds", batch_preds.shape, batch_preds)
             batch_surrogate = surrogate_preds_tensor[i:batch_end].repeat(H, 1) # ground truth on these points is same for every model
-            print("batch surrogate", batch_surrogate.shape, batch_surrogate)
             batch_loss = self.loss_fn( 
                 batch_preds,
                 batch_surrogate,
@@ -38,86 +41,75 @@ class AMS:
 
             losses[:, i:batch_end] = batch_loss
 
-        print("hypotheses losses", losses.shape, losses)
-
         return losses
-    
-    def _get_loss_mean_variance(self, loss):
-        """Get the mean loss and variance (over the whole dataset) for each hypotheses.
-        Args:
-            loss: shape [H,N]
-        """
-        mu_h = loss.mean(dim=1)
-        print("surrogate_mu.shape", mu_h.shape)
 
-        # mu_h is shape [H]
-        variance = loss.var(dim=0).mean()
-        sigma = torch.sqrt(variance)
-
-        return mu_h, sigma
-    
-    def _compute_p_h(self, mu_h, sigma):
-        """Compute p(h=h*), i.e. the probability that the loss of model h is the lowest of all models.
-        We assume each model's loss is normally distriuted ~ N(mu_h[h], sigma).
-        Args:
-            mu_h: shape (H,), one (estimated) loss for each model, which we assume
-            sigma: one shared std dev for all models
+    # TODO: check chatgpt
+    def _compute_p_h(self, mu_h, sigma_h):
         """
-        diff_matrix = mu_h.unsqueeze(1) - mu_h.unsqueeze(0)
+        Compute p(h=h*), i.e., the probability that the loss of model h is the lowest of all models.
+        We assume each model's loss is normally distributed ~ N(mu_h[h], sigma_h[h]).
+        
+        Args:
+            mu_h: shape (H,), one (estimated) mean loss for each model.
+            sigma_h: shape (H,), standard deviation for each model's loss.
+        """
+        H = mu_h.shape[0]  # Number of models
+        
+        # Create a matrix where each element (i,j) contains the difference mu_h[i] - mu_h[j]
+        diff_matrix = mu_h.unsqueeze(1) - mu_h.unsqueeze(0)  # Shape (H, H)
+        
+        # Compute the pairwise standard deviations for each pair of models
+        sigma_matrix = torch.sqrt(sigma_h.unsqueeze(1)**2 + sigma_h.unsqueeze(0)**2)  # Shape (H, H)
+        
+        # Normal distribution with mean 0 and variance 1
         normal = Normal(torch.tensor([0.0], device=self.device), torch.tensor([1.0], device=self.device))
-        pairwise_probs = normal.cdf(diff_matrix / (torch.sqrt(torch.tensor(2.0, device=self.device)) * sigma))
+        
+        # Compute the pairwise probabilities using the individual sigma for each model pair
+        pairwise_probs = normal.cdf(diff_matrix / (torch.sqrt(torch.tensor(2.0, device=self.device)) * sigma_matrix))
+        
+        # Set the diagonal to 1 (since we compare a model with itself)
         pairwise_probs.fill_diagonal_(1)
-        log_p_h = pairwise_probs.log().sum(dim=1)
-        p_h = torch.exp(log_p_h - torch.logsumexp(log_p_h, dim=0))
+        
+        # Compute the log of the probabilities for numerical stability
+        log_p_h = pairwise_probs.log().sum(dim=1)  # Log probability that each model has the lowest loss
+        
+        # Convert back to probabilities and normalize
+        p_h = torch.exp(log_p_h - torch.logsumexp(log_p_h, dim=0))  # Normalize to ensure the probabilities sum to 1
+        
+        # Store the last p_h and return
         self.last_p_h = p_h
-        return self.last_p_h
 
     def do_step(self, d_u_idxs):
-        print("getting losses wrt surrogate")
-        loss = self._losses() # shape (H, N)
+        loss = self._losses() # shape (H, N); uses self.last_p_h as necessary
 
-        if self.use_p_h:
-            # mu_h: shape (H,) - mean loss of each hypothesis over whole dataset, w.r.t. surrogate pseudo ground truth
-            # sigma: shape (,) - one variance value over all losses over all hypotheses
-            mu_h, sigma = self._get_loss_mean_variance(loss)
-            print("mu_h", mu_h.shape, mu_h)
-            print("sigma", sigma.shape, sigma)
-            p_h = self._compute_p_h(mu_h, sigma)
-            print("p_h", p_h.shape, p_h)
-            print("p_h min, max, mean", p_h.min(), p_h.max(), p_h.mean())
+        if self.use_p_h and self.lure_estimator.M >= 2: # need at least 2 points to get variance
+            # mus: shape (H,) - mean loss of each hypothesis over whole dataset (LURE estimate)
+            # sigmas: shape (H,) - variance of LURE estimates
+            # mu_h, sigma = self._get_loss_mean_variance(loss)
+            mus, sigmas = self.lure_estimator.get_LUREs_and_vars()
+            
+            # use these to compute p(h=h*), probability that each model is the best
+            # (stored in self.last_p_h)
+            self._compute_p_h(mus, sigmas)
 
-        print("losses", loss.shape, loss)
+        # weight losses w.r.t. ranking of hypotheses
         weighted_losses = (self.last_p_h.unsqueeze(1) * loss).sum(dim=0)
-        print("weighted losses", weighted_losses.shape, weighted_losses)
-
-        print("subtracting min loss")
-        weighted_losses = weighted_losses - weighted_losses.min()
-        print("weighted losses min subtracted", weighted_losses.shape, weighted_losses)
-
+        weighted_losses = weighted_losses - weighted_losses.min() # new approach
         qs = weighted_losses[d_u_idxs]
 
-        print("qs0", qs)
-        qs = torch.nan_to_num(qs, nan=0.0)
-        print("qs1", qs)
-
+        # fix up qs to make sure it is a valid distribution
         # TODO should probably assert nothing below 0
+        qs = torch.nan_to_num(qs, nan=0.0)
         qs[qs <= 0] = 1e-9
-        print("qs2", qs)
-
         if qs.sum() == 0:
-            print("qs sum is 0")
             qs = torch.ones_like(qs) / len(qs)
         else:
-            print("qs sum is not 0")
-            print("qs sum", qs.sum())
-            print("qs before norm: shape, min, max, mean, std", qs.shape, qs.min(), qs.max(), qs.mean(), qs.std())
             qs = qs / qs.sum()
 
-        print("qs final: shape, min, max, mean, std", qs.shape, qs.min(), qs.max(), qs.mean(), qs.std())
-
-        import matplotlib.pyplot as plt
-        plt.bar(list(range(len(qs))), qs.cpu().numpy())
-        plt.savefig("qs.png")
+        # import matplotlib.pyplot as plt
+        # plt.figure()
+        # plt.bar(list(range(len(qs))), qs.cpu().numpy())
+        # plt.savefig(f"qs-{self.lure_estimator.M}.png")
         
         choice = torch.multinomial(qs, 1).item()
         return d_u_idxs[choice], qs[choice].item()

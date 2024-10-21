@@ -52,84 +52,7 @@ def seed_all(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# def compute_LUREs(pred_logits, d_l_idxs, d_l_ys, qm, loss_fn, device, batch_size=100):
-#     """
-#         pred_logits: shape (num_models, num_data_points, num_classes)
-#         d_l_idxs: labeled indices, list of length M
-#         d_l_ys: corresponding labels for d_l_idxs, also length M
-#         qm: sampling probability for all points in d_l_idxs, also length M
-#     """
-#     H, N, C = pred_logits.shape
-#     M = len(d_l_idxs)
-    
-#     # Move all data to the specified device
-#     pred_logits = pred_logits[:, d_l_idxs, :].to(device)
-#     d_l_ys = torch.tensor(d_l_ys, device=device)
-#     qm = torch.tensor(qm, device=device)
-
-#     losses = torch.zeros(H, device=device)
-
-#     for i in range(0, M, batch_size):
-#         batch_end = min(i + batch_size, M)
-#         batch_preds = pred_logits[:, i:batch_end, :]
-#         batch_labels = d_l_ys[i:batch_end]
-#         batch_qm = qm[i:batch_end]
-
-#         batch_losses = loss_fn(batch_preds.reshape(-1, C), batch_labels.repeat(H), reduction='none').view(H, -1)
-
-#         for m in range(batch_end - i):
-#             v_m = 1 + (N - M) / (N - (i + m)) * (1 / ((N - (i + m) + 1) * batch_qm[m]) - 1)
-#             batch_losses[:, m] *= v_m
-
-#         losses += batch_losses.sum(dim=1)
-
-#     return (losses / M).tolist()
-
-
-# # TODO: this is a chatGPT generation
-# def compute_LUREs_and_variance(pred_logits, d_l_idxs, d_l_ys, qm, loss_fn, device, batch_size=100):
-#     """
-#         pred_logits: shape (num_models, num_data_points, num_classes)
-#         d_l_idxs: labeled indices, list of length M
-#         d_l_ys: corresponding labels for d_l_idxs, also length M
-#         qm: sampling probability for all points in d_l_idxs, also length M
-#     """
-#     H, N, C = pred_logits.shape
-#     M = len(d_l_idxs)
-    
-#     # Move all data to the specified device
-#     pred_logits = pred_logits[:, d_l_idxs, :].to(device)
-#     d_l_ys = torch.tensor(d_l_ys, device=device)
-#     qm = torch.tensor(qm, device=device)
-
-#     losses = torch.zeros(H, device=device)
-#     squared_losses = torch.zeros(H, device=device)  # To accumulate squared losses for variance calculation
-
-#     for i in range(0, M, batch_size):
-#         batch_end = min(i + batch_size, M)
-#         batch_preds = pred_logits[:, i:batch_end, :]
-#         batch_labels = d_l_ys[i:batch_end]
-#         batch_qm = qm[i:batch_end]
-
-#         # Compute loss for the batch (no reduction)
-#         batch_losses = loss_fn(batch_preds.reshape(-1, C), batch_labels.repeat(H), reduction='none').view(H, -1)
-
-#         for m in range(batch_end - i):
-#             v_m = 1 + (N - M) / (N - (i + m)) * (1 / ((N - (i + m) + 1) * batch_qm[m]) - 1)
-#             batch_losses[:, m] *= v_m  # Apply the importance sampling weight to the loss
-
-#         losses += batch_losses.sum(dim=1)  # Accumulate weighted losses
-#         squared_losses += (batch_losses ** 2).sum(dim=1)  # Accumulate squared weighted losses
-
-#     # Final LURE estimate
-#     lure_estimate = losses / M
-
-#     # Variance of LURE: V(R_LURE) = (sum of v_m^2 * losses^2) - (sum of v_m * losses)^2 / M^2
-#     variance_lure = (squared_losses / M) - (lure_estimate ** 2)
-
-#     return lure_estimate.tolist(), variance_lure.tolist()
-
-class LUREEstimates:
+class LUREEstimator:
     def __init__(self, H, N, C, loss_fn, device):
         """
         H: Number of models in the ensemble
@@ -156,7 +79,7 @@ class LUREEstimates:
         """
         vs = []
         for m in range(self.M):
-            v = 1 + (self.N - self.M) / (self.M - m) * (1 / ((self.N - m + 1) * self.qs[m]) - 1)
+            v = 1 + ( (self.N - self.M) / (self.N - m) ) * (1 / ((self.N - m + 1) * self.qs[m]) - 1) 
             vs.append(v)
         return vs
 
@@ -169,7 +92,6 @@ class LUREEstimates:
             label: int - true label for the sampled point
             qm: float - sampling probability of this point
         """
-        # Convert inputs to tensors on the correct device
         pred_logits = torch.tensor(pred_logits, device=self.device)
         label = torch.tensor([label], device=self.device)
 
@@ -192,19 +114,12 @@ class LUREEstimates:
             - variance_lure: shape (H,) - variance of LURE estimates for each model
         """
         # Convert lists to tensors for vectorized operations
-        losses = torch.stack(self.losses, dim=1)  # Shape (H, M)
+        losses = torch.stack(self.losses, dim=1).view(self.H, -1)  # Shape (H, M)
         vs = torch.tensor(self.get_vs(), device=self.device)  # Shape (M,)
-
-        # Apply the weights to the losses
         weighted_losses = vs * losses  # Shape (H, M)
         squared_losses = (vs**2) * (losses**2)  # Shape (H, M)
-
-        # Compute the LURE estimates for each model
         lure_estimates = weighted_losses.sum(dim=1) / self.M  # Shape (H,)
-
-        # Compute the variance of the LURE estimates for each model
         variance_lure = squared_losses.sum(dim=1) / self.M - lure_estimates**2  # Shape (H,)
-
         return lure_estimates, variance_lure
 
 
@@ -256,6 +171,7 @@ def main():
     # Load prediction results of all hypotheses
     dataset = DATASETS[args.dataset](args.task, dataset_filter=args.dataset_filter)
     dataset.load_runs(subsample_pct=args.subsample_pct, force_reload=args.force_reload, write=not args.no_write)
+    H, N, C = dataset.pred_logits.shape
     experiment.log_parameter("num_runs", len(dataset.get_run_tasks()))
 
     # Loss and accuracy functions
@@ -275,11 +191,10 @@ def main():
     experiment.log_metric("Best loss", best_loss)
     experiment.log_metric("Best accuracy", best_acc)
     
-    print("min and max loss",min(oracle.true_losses),max(oracle.true_losses))
-    print("min and max accuracy", min(oracle.true_accs), max(oracle.true_accs))
+    # our LURE estimates and variances
+    lure_estimator = LUREEstimator(H, N, C, loss_fn, device)
 
     # model selection algorithm
-    # TODO pass LUREEstimates to surrogate as needed
     if args.algorithm == 'ours':
         if args.ensemble == 'naive':
             surrogate = Ensemble(dataset.pred_logits)
@@ -289,7 +204,7 @@ def main():
             surrogate = OracleSurrogate(oracle)
         elif args.ensemble != 'none':
             raise NotImplementedError("Ensemble" + args.ensemble + "not supported.")
-        model = AMS(surrogate, loss_fn, use_p_h=not args.no_p)
+        model = AMS(surrogate, loss_fn, lure_estimator, use_p_h=not args.no_p)
     elif args.algorithm == 'iid':
         model = IID()
     else:
@@ -312,11 +227,11 @@ def main():
     # active model selection loop
     for m in tqdm(range(args.iters)):
         # sample data point
-        print("doing step")
         d_m_idx, qm = model.do_step(d_u_idxs)
 
         d_l_idxs.append(d_m_idx)
         d_u_idxs.remove(d_m_idx)
+
         qms.append(qm)
 
         # label data point
@@ -325,10 +240,14 @@ def main():
 
         # update loss estimates for all models
         # LURE_means = compute_LUREs(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
-        LURE_means, LURE_vars = compute_LUREs_and_variance(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
+        # LURE_means, LURE_vars = compute_LUREs_and_variance(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
+        lure_estimator.add_observation(dataset.pred_logits[:, d_m_idx, :].squeeze(1), d_m_y, qm)
+
+        # compute LURE estimates
+        LURE_means, LURE_vars = lure_estimator.get_LUREs_and_vars()
 
         # do model selection
-        best_model_idx_pred = np.argmin(np.array(LURE_means))
+        best_model_idx_pred = np.argmin(np.array(LURE_means.cpu()))
         best_loss_pred = LURE_means[best_model_idx_pred]
         
         # log metrics
