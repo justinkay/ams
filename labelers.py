@@ -39,20 +39,19 @@ class Oracle:
             batch_end = min(i + batch_size, H)
             batch_preds = preds[i:batch_end]
             batch_labels = self.labels
-            print("batch labels in compute_losses", batch_labels)
             batch_losses = self.loss_fn(batch_preds.view(-1, C), batch_labels.repeat(batch_end - i), reduction='none')
             batch_losses = batch_losses.view(batch_end - i, N).mean(dim=1) # Compute mean loss for each model
             losses.extend(batch_losses.tolist())
             torch.cuda.empty_cache()
 
         # JK: for testing / understanding
-        data_point_losses = self.loss_fn(
-            preds.view(-1,C), 
-            self.labels.repeat(H),
-            reduction='none'
-        ).view(H, N).mean(dim=0)
-        print("data_point_losses", data_point_losses.shape, data_point_losses)
-        print("data_point_losses min, max, mean, std", data_point_losses.min(), data_point_losses.max(), data_point_losses.mean(), data_point_losses.std())
+        # data_point_losses = self.loss_fn(
+        #     preds.view(-1,C), 
+        #     self.labels.repeat(H),
+        #     reduction='none'
+        # ).view(H, N).mean(dim=0)
+        # print("data_point_losses", data_point_losses.shape, data_point_losses)
+        # print("data_point_losses min, max, mean, std", data_point_losses.min(), data_point_losses.max(), data_point_losses.mean(), data_point_losses.std())
 
         return losses
 

@@ -92,17 +92,9 @@ class LUREEstimator:
             label: int - true label for the sampled point
             qm: float - sampling probability of this point
         """
-        pred_logits = torch.tensor(pred_logits, device=self.device)
-        label = torch.tensor([label], device=self.device)
-
-        # Compute the loss for each model (without reduction)
-        loss = self.loss_fn(pred_logits, label.repeat(self.H), reduction='none')
+        loss = self.loss_fn(pred_logits, torch.tensor([label], device=self.device).repeat(self.H), reduction='none')
         self.losses.append(loss)
-
-        # Store the sampling probability
         self.qs.append(qm)
-
-        # Increment the number of sampled points
         self.M += 1
 
     def get_LUREs_and_vars(self):
@@ -139,32 +131,17 @@ def parse_args():
     parser.add_argument("--no-comet", action='store_true', help="Disable logging with Comet ML")
     parser.add_argument("--no-p", action='store_true', help='Disable use of p(h=h*)')
 
-    parser.add_argument("--seed", type=int, default=0)
+    # how many seeds to use - one experiment per seed
+    parser.add_argument("--seeds", type=int, default=3)
 
     return parser.parse_args()
 
 def main():
     args = parse_args()
-    seed_all(args.seed)
-    
+
     # Modify args as needed
     if args.algorithm == 'iid':
         args.ensemble = 'none'
-
-    # Setup Comet.ML experiment
-    experiment = Experiment(
-        project_name="ams",
-        workspace=os.environ["COMET_WORKSPACE"],
-        api_key=os.environ["COMET_API_KEY"],
-        log_env_details=False,
-        disabled = args.no_comet
-    )
-    experiment.set_name("-".join([f'{k}={str(v)}' for k,v in vars(args).items()]))
-    experiment.log_parameters(args)
-    algorithm_detail = "-".join([args.algorithm, args.ensemble, args.loss])
-    if args.algorithm != 'iid':
-        algorithm_detail += f"p={not args.no_p}"
-    experiment.log_parameter("algorithm-detail", algorithm_detail)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -172,7 +149,6 @@ def main():
     dataset = DATASETS[args.dataset](args.task, dataset_filter=args.dataset_filter)
     dataset.load_runs(subsample_pct=args.subsample_pct, force_reload=args.force_reload, write=not args.no_write)
     H, N, C = dataset.pred_logits.shape
-    experiment.log_parameter("num_runs", len(dataset.get_run_tasks()))
 
     # Loss and accuracy functions
     accuracy_fn = ACCURACY_FNS[args.dataset].to(dataset.device)
@@ -185,90 +161,113 @@ def main():
     else:
         labeler = LABELERS[args.labeler]
 
-    # Log our baselines/best case results
-    best_loss = min(oracle.true_losses)
-    best_acc =  max(oracle.true_accs)
-    experiment.log_metric("Best loss", best_loss)
-    experiment.log_metric("Best accuracy", best_acc)
-    
-    # our LURE estimates and variances
-    lure_estimator = LUREEstimator(H, N, C, loss_fn, device)
+    for seed in range(args.seeds):
+        print("Running active model selection with seed", seed)
+        seed_all(seed)
 
-    # model selection algorithm
-    if args.algorithm == 'ours':
-        if args.ensemble == 'naive':
-            surrogate = Ensemble(dataset.pred_logits)
-        elif args.ensemble == 'weighted':
-            surrogate = WeightedEnsemble(dataset.pred_logits)
-        elif args.ensemble == 'oracle':
-            surrogate = OracleSurrogate(oracle)
-        elif args.ensemble != 'none':
-            raise NotImplementedError("Ensemble" + args.ensemble + "not supported.")
-        model = AMS(surrogate, loss_fn, lure_estimator, use_p_h=not args.no_p)
-    elif args.algorithm == 'iid':
-        model = IID()
-    else:
-        raise NotImplementedError("Algorithm" + args.algorithm + "not supported.")
+        # Setup Comet.ML experiment
+        experiment = Experiment(
+            project_name="ams",
+            workspace=os.environ["COMET_WORKSPACE"],
+            api_key=os.environ["COMET_API_KEY"],
+            log_env_details=False,
+            disabled = args.no_comet
+        )
+        experiment.set_name("-".join([f'{k}={str(v)}' for k,v in vars(args).items()]))
+        experiment.log_parameters(args)
+        algorithm_detail = "-".join([args.algorithm, args.ensemble, args.loss])
+        if args.algorithm != 'iid':
+            algorithm_detail += f"p={not args.no_p}"
+        experiment.log_parameters({
+            "algorithm-detail": algorithm_detail, 
+            "num_runs": len(dataset.get_run_tasks()),
+            "seed": seed,
+        })
 
-    # labeled data point indices and labels - at first, no points are labeled
-    d_l_idxs = [] 
-    d_l_ys = []
-
-    # unlabeled data point indices - at first, all points are unlabeled
-    d_u_idxs = list(range(dataset.pred_logits.shape[1]))
-
-    # store acquisition probabilities for labeled points to compute LURE estimates
-    qms = []
-
-    # metrics we will track
-    cumulative_regret_loss = 0
-    cumulative_regret_acc = 0
-
-    # active model selection loop
-    for m in tqdm(range(args.iters)):
-        # sample data point
-        d_m_idx, qm = model.do_step(d_u_idxs)
-
-        d_l_idxs.append(d_m_idx)
-        d_u_idxs.remove(d_m_idx)
-
-        qms.append(qm)
-
-        # label data point
-        d_m_y = labeler(d_m_idx)
-        d_l_ys.append(d_m_y)
-
-        # update loss estimates for all models
-        # LURE_means = compute_LUREs(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
-        # LURE_means, LURE_vars = compute_LUREs_and_variance(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
-        lure_estimator.add_observation(dataset.pred_logits[:, d_m_idx, :].squeeze(1), d_m_y, qm)
-
-        # compute LURE estimates
-        LURE_means, LURE_vars = lure_estimator.get_LUREs_and_vars()
-
-        # do model selection
-        best_model_idx_pred = np.argmin(np.array(LURE_means.cpu()))
-        best_loss_pred = LURE_means[best_model_idx_pred]
+        # Log our baselines/best case results
+        best_loss = min(oracle.true_losses)
+        best_acc =  max(oracle.true_accs)
+        experiment.log_metric("Best loss", best_loss)
+        experiment.log_metric("Best accuracy", best_acc)
         
-        # log metrics
-        experiment.log_metric("Pred. best model idx", best_model_idx_pred, step=m)
-        experiment.log_metric("Pred. best model, pred. loss", best_loss_pred, step=m)
-        experiment.log_metric("Pred. best model, true loss", oracle.true_losses[best_model_idx_pred], step=m)
-        experiment.log_metric("Pred. best model, true accuracy", oracle.true_accs[best_model_idx_pred], step=m)
+        # our LURE estimates and variances
+        lure_estimator = LUREEstimator(H, N, C, loss_fn, device)
 
-        cumulative_regret_loss += oracle.true_losses[best_model_idx_pred] - best_loss
-        cumulative_regret_acc += best_acc - oracle.true_accs[best_model_idx_pred]
-        experiment.log_metric("Cumulative regret (loss)", cumulative_regret_loss, step=m)
-        experiment.log_metric("Cumulative regret (acc)", cumulative_regret_acc, step=m)
+        # model selection algorithm
+        if args.algorithm == 'ours':
+            if args.ensemble == 'naive':
+                surrogate = Ensemble(dataset.pred_logits)
+            elif args.ensemble == 'weighted':
+                surrogate = WeightedEnsemble(dataset.pred_logits)
+            elif args.ensemble == 'oracle':
+                surrogate = OracleSurrogate(oracle)
+            elif args.ensemble != 'none':
+                raise NotImplementedError("Ensemble" + args.ensemble + "not supported.")
+            model = AMS(surrogate, loss_fn, lure_estimator, use_p_h=not args.no_p)
+        elif args.algorithm == 'iid':
+            model = IID()
+        else:
+            raise NotImplementedError("Algorithm" + args.algorithm + "not supported.")
 
-        # get ensemble accuracy at this time step (just for logging purposes)
-        if args.ensemble != 'none': # none -> iid
-            surrogate_preds = surrogate.get_preds(weights=model.last_p_h)
-            N, C = surrogate_preds.shape
-            surrogate_loss = loss_fn(surrogate_preds.reshape(-1, C), oracle.labels).mean() # TODO is this the right way to mean()
-            surrogate_acc = accuracy_fn(surrogate_preds.reshape(-1, C), oracle.labels)
-            experiment.log_metric("Ensemble loss", surrogate_loss, step=m)
-            experiment.log_metric("Ensemble accuracy", surrogate_acc, step=m)
+        # labeled data point indices and labels - at first, no points are labeled
+        d_l_idxs = [] 
+        d_l_ys = []
+
+        # unlabeled data point indices - at first, all points are unlabeled
+        d_u_idxs = list(range(dataset.pred_logits.shape[1]))
+
+        # store acquisition probabilities for labeled points to compute LURE estimates
+        qms = []
+
+        # metrics we will track
+        cumulative_regret_loss = 0
+        cumulative_regret_acc = 0
+
+        # active model selection loop
+        for m in tqdm(range(args.iters)):
+            # sample data point
+            d_m_idx, qm = model.do_step(d_u_idxs)
+
+            d_l_idxs.append(d_m_idx)
+            d_u_idxs.remove(d_m_idx)
+
+            qms.append(qm)
+
+            # label data point
+            d_m_y = labeler(d_m_idx)
+            d_l_ys.append(d_m_y)
+
+            # update loss estimates for all models
+            # LURE_means = compute_LUREs(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
+            # LURE_means, LURE_vars = compute_LUREs_and_variance(dataset.pred_logits, d_l_idxs, d_l_ys, qms, loss_fn, device)
+            lure_estimator.add_observation(dataset.pred_logits[:, d_m_idx, :].squeeze(1), d_m_y, qm)
+
+            # compute LURE estimates
+            LURE_means, LURE_vars = lure_estimator.get_LUREs_and_vars()
+
+            # do model selection
+            best_model_idx_pred = np.argmin(np.array(LURE_means.cpu()))
+            best_loss_pred = LURE_means[best_model_idx_pred]
+            
+            # log metrics
+            experiment.log_metric("Pred. best model idx", best_model_idx_pred, step=m)
+            experiment.log_metric("Pred. best model, pred. loss", best_loss_pred, step=m)
+            experiment.log_metric("Pred. best model, true loss", oracle.true_losses[best_model_idx_pred], step=m)
+            experiment.log_metric("Pred. best model, true accuracy", oracle.true_accs[best_model_idx_pred], step=m)
+
+            cumulative_regret_loss += oracle.true_losses[best_model_idx_pred] - best_loss
+            cumulative_regret_acc += best_acc - oracle.true_accs[best_model_idx_pred]
+            experiment.log_metric("Cumulative regret (loss)", cumulative_regret_loss, step=m)
+            experiment.log_metric("Cumulative regret (acc)", cumulative_regret_acc, step=m)
+
+            # get ensemble accuracy at this time step (just for logging purposes)
+            if args.ensemble != 'none': # none -> iid
+                surrogate_preds = surrogate.get_preds(weights=model.last_p_h)
+                N, C = surrogate_preds.shape
+                surrogate_loss = loss_fn(surrogate_preds.reshape(-1, C), oracle.labels).mean() # TODO is this the right way to mean()
+                surrogate_acc = accuracy_fn(surrogate_preds.reshape(-1, C), oracle.labels)
+                experiment.log_metric("Ensemble loss", surrogate_loss, step=m)
+                experiment.log_metric("Ensemble accuracy", surrogate_acc, step=m)
 
 if __name__ == "__main__":
     main()
