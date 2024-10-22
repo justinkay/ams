@@ -43,8 +43,7 @@ class AMS:
 
         return losses
 
-    # TODO: check chatgpt
-    def _compute_p_h(self, mu_h, sigma_h):
+    def _compute_p_h(self, mu_h, sigma_h_squared):
         """
         Compute p(h=h*), i.e., the probability that the loss of model h is the lowest of all models.
         We assume each model's loss is normally distributed ~ N(mu_h[h], sigma_h[h]).
@@ -53,31 +52,80 @@ class AMS:
             mu_h: shape (H,), one (estimated) mean loss for each model.
             sigma_h: shape (H,), standard deviation for each model's loss.
         """
-        H = mu_h.shape[0]  # Number of models
+        # # gumbel max trick
+        # num_samples = 20000
+        # H = mu_h.shape[0]
+
+        # print("mu_h", mu_h)
+        # print("mu_h min", mu_h.min())
+        # print("sigma squared", sigma_h_squared)
+        # print("sigma squared min", sigma_h_squared.min())
+
+        # # variance -> std
+        # sigma_h = torch.sqrt(sigma_h_squared)
+    
+        # # Sample from Gumbel distribution
+        # gumbel_noise = -torch.log(-torch.log(torch.rand(H, num_samples, device=mu_h.device)))
+
+        # # Sample from the Gaussian loss distribution and add Gumbel noise
+        # losses_with_noise = mu_h.unsqueeze(1) + sigma_h.unsqueeze(1) * torch.randn(H, num_samples, device=mu_h.device) + gumbel_noise
+        # print("losses with noise", losses_with_noise.shape, losses_with_noise)
+
+        # # Determine the model with the lowest (noisy) loss for each sample
+        # best_model_losses, best_model_idxs = torch.min(losses_with_noise, dim=0)
+        # print("best model_idxs", best_model_idxs.shape, best_model_idxs)
+        # print("best losses", best_model_losses.shape, best_model_losses)
         
-        # Create a matrix where each element (i,j) contains the difference mu_h[i] - mu_h[j]
-        diff_matrix = mu_h.unsqueeze(1) - mu_h.unsqueeze(0)  # Shape (H, H)
+        # # Count how often each model is the best
+        # best_model_counts = torch.bincount(best_model_idxs, minlength=H)
+        # print("best_model_counts",best_model_counts)
         
-        # Compute the pairwise standard deviations for each pair of models
-        sigma_matrix = torch.sqrt(sigma_h.unsqueeze(1)**2 + sigma_h.unsqueeze(0)**2)  # Shape (H, H)
+        # # Convert counts to probabilities
+        # p_h = best_model_counts.float() / num_samples
         
-        # Normal distribution with mean 0 and variance 1
-        normal = Normal(torch.tensor([0.0], device=self.device), torch.tensor([1.0], device=self.device))
-        
-        # Compute the pairwise probabilities using the individual sigma for each model pair
-        pairwise_probs = normal.cdf(diff_matrix / (torch.sqrt(torch.tensor(2.0, device=self.device)) * sigma_matrix))
-        
-        # Set the diagonal to 1 (since we compare a model with itself)
-        pairwise_probs.fill_diagonal_(1)
-        
-        # Compute the log of the probabilities for numerical stability
-        log_p_h = pairwise_probs.log().sum(dim=1)  # Log probability that each model has the lowest loss
-        
-        # Convert back to probabilities and normalize
-        p_h = torch.exp(log_p_h - torch.logsumexp(log_p_h, dim=0))  # Normalize to ensure the probabilities sum to 1
-        
-        # Store the last p_h and return
+        # self.last_p_h = p_h
+        # return p_h
+
+        # monte carlo method
+        num_samples = 10000
+        H = mu_h.shape[0]
+
+        # Compute standard deviations from the variances
+        sigma_h = torch.sqrt(sigma_h_squared)
+
+        # Identify the device
+        device = mu_h.device  # Assuming mu_h and sigma_h are on the same device
+
+        # Define batch size based on available memory
+        batch_size = 1000  # Adjust this number based on your memory constraints
+        num_batches = (num_samples + batch_size - 1) // batch_size
+
+        # Initialize counts on the correct device
+        best_model_counts = torch.zeros(H, dtype=torch.int64, device=device)
+
+        remaining_samples = num_samples  # Keep track of remaining samples
+
+        for _ in range(num_batches):
+            current_batch_size = min(batch_size, remaining_samples)
+            remaining_samples -= current_batch_size
+
+            # Generate samples on the correct device
+            samples = torch.randn(H, current_batch_size, device=device) * sigma_h[:, None] + mu_h[:, None]
+
+            # Determine which model has the lowest loss for each sample
+            best_model_idxs = torch.argmin(samples, dim=0)
+
+            # Count how often each model is the best
+            batch_counts = torch.bincount(best_model_idxs, minlength=H)
+
+            best_model_counts += batch_counts
+
+        total_samples = num_samples - remaining_samples
+        # Convert counts to probabilities
+        p_h = best_model_counts.float() / total_samples
+
         self.last_p_h = p_h
+        return p_h
 
     def do_step(self, d_u_idxs):
         loss = self._losses() # shape (H, N); uses self.last_p_h as necessary
@@ -87,14 +135,14 @@ class AMS:
             # sigmas: shape (H,) - variance of LURE estimates
             # mu_h, sigma = self._get_loss_mean_variance(loss)
             mus, sigmas = self.lure_estimator.get_LUREs_and_vars()
-            
+
             # use these to compute p(h=h*), probability that each model is the best
             # (stored in self.last_p_h)
             self._compute_p_h(mus, sigmas)
 
         # weight losses w.r.t. ranking of hypotheses
         weighted_losses = (self.last_p_h.unsqueeze(1) * loss).sum(dim=0)
-        weighted_losses = weighted_losses - weighted_losses.min() # new approach
+        weighted_losses = weighted_losses - weighted_losses.min() # new approach - scale q to min loss at each point
         qs = weighted_losses[d_u_idxs]
 
         # fix up qs to make sure it is a valid distribution

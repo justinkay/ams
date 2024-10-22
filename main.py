@@ -40,7 +40,10 @@ LABELERS = {
 }
 
 ACCURACY_FNS = {
-    'domainnet126': Accuracy(task="multiclass", num_classes=126, average="macro"), # Musgrave et al use macro average
+    'domainnet126': {
+        'acc': Accuracy(task="multiclass", num_classes=126, average="macro"), # Musgrave et al use macro average
+        'micro': Accuracy(task="multiclass", num_classes=126, average="micro"),
+    }
 }
 
 def seed_all(seed):
@@ -105,7 +108,6 @@ class LUREEstimator:
             - lure_estimates: shape (H,) - LURE estimates for each model
             - variance_lure: shape (H,) - variance of LURE estimates for each model
         """
-        # Convert lists to tensors for vectorized operations
         losses = torch.stack(self.losses, dim=1).view(self.H, -1)  # Shape (H, M)
         vs = torch.tensor(self.get_vs(), device=self.device)  # Shape (M,)
         weighted_losses = vs * losses  # Shape (H, M)
@@ -130,9 +132,11 @@ def parse_args():
     parser.add_argument("--no-write", action='store_true', help="Don't write preds to an intermediate .dat or .pt file.")
     parser.add_argument("--no-comet", action='store_true', help="Disable logging with Comet ML")
     parser.add_argument("--no-p", action='store_true', help='Disable use of p(h=h*)')
+    parser.add_argument("--acc", default="acc", help="Accuracy fn. Options specific to dataset, see main.py.")
+    parser.add_argument("--selection", default="means", help="How to choose the best estimate. 'means': select lowest LURE mu, 'probs': use p(h=h*)")
 
     # how many seeds to use - one experiment per seed
-    parser.add_argument("--seeds", type=int, default=3)
+    parser.add_argument("--seeds", type=int, default=5)
 
     return parser.parse_args()
 
@@ -151,7 +155,7 @@ def main():
     H, N, C = dataset.pred_logits.shape
 
     # Loss and accuracy functions
-    accuracy_fn = ACCURACY_FNS[args.dataset].to(dataset.device)
+    accuracy_fn = ACCURACY_FNS[args.dataset][args.acc].to(dataset.device)
     loss_fn = LOSS_FNS[args.loss]
 
     # Label function - oracle or (future work) a user
@@ -171,11 +175,11 @@ def main():
             workspace=os.environ["COMET_WORKSPACE"],
             api_key=os.environ["COMET_API_KEY"],
             log_env_details=False,
-            disabled = args.no_comet
+            disabled = args.no_comet,
         )
         experiment.set_name("-".join([f'{k}={str(v)}' for k,v in vars(args).items()]))
         experiment.log_parameters(args)
-        algorithm_detail = "-".join([args.algorithm, args.ensemble, args.loss])
+        algorithm_detail = "-".join([args.algorithm, args.ensemble, args.loss, args.selection])
         if args.algorithm != 'iid':
             algorithm_detail += f"p={not args.no_p}"
         experiment.log_parameters({
@@ -246,7 +250,25 @@ def main():
             LURE_means, LURE_vars = lure_estimator.get_LUREs_and_vars()
 
             # do model selection
-            best_model_idx_pred = np.argmin(np.array(LURE_means.cpu()))
+            if args.selection == 'means' or m < 2:
+                best_model_idx_pred = np.argmin(np.array(LURE_means.cpu()))
+            elif args.selection == 'probs':
+                # print("lure means", LURE_means.shape, LURE_means)
+                best_pred_loss, best_pred_loss_idx = torch.min(LURE_means, dim=0)
+                # print("LURE best_pred_loss, best_pred-loss_idx", best_pred_loss, best_pred_loss_idx)
+
+                best_model_prob, best_model_prob_idx = torch.max(model.last_p_h, dim=0)
+                # print("in probs, best_model_prob, best_model_prob_idx", best_model_prob, best_model_prob_idx)
+                best_model_idx_pred = np.argmax(np.array(model.last_p_h.cpu()))
+                # print("numpy version", best_model_idx_pred)
+                
+                print("idxs: LURE, p(h)", best_pred_loss_idx, best_model_prob_idx)
+
+                print("lowest LURE", best_pred_loss, "sigma", LURE_vars[best_pred_loss_idx])
+                print("LURE of p(h) choice", LURE_means[best_model_idx_pred], "sigma", LURE_vars[best_model_idx_pred])
+                print("highest p(h)", best_model_prob)
+                print("p(h) of LURE choice", model.last_p_h[best_pred_loss_idx])
+                
             best_loss_pred = LURE_means[best_model_idx_pred]
             
             # log metrics
@@ -262,10 +284,12 @@ def main():
 
             # get ensemble accuracy at this time step (just for logging purposes)
             if args.ensemble != 'none': # none -> iid
-                surrogate_preds = surrogate.get_preds(weights=model.last_p_h)
+                surrogate_preds = surrogate.get_preds(weights=model.last_p_h) # these are softmaxed already!
                 N, C = surrogate_preds.shape
                 surrogate_loss = loss_fn(surrogate_preds.reshape(-1, C), oracle.labels).mean() # TODO is this the right way to mean()
                 surrogate_acc = accuracy_fn(surrogate_preds.reshape(-1, C), oracle.labels)
+
+                print("surrogate acc", surrogate_acc)
                 experiment.log_metric("Ensemble loss", surrogate_loss, step=m)
                 experiment.log_metric("Ensemble accuracy", surrogate_acc, step=m)
 
