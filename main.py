@@ -193,6 +193,8 @@ def main():
         best_acc =  max(oracle.true_accs)
         experiment.log_metric("Best loss", best_loss)
         experiment.log_metric("Best accuracy", best_acc)
+        print("Best possible accuracy", best_acc)
+        print("Best possible loss", best_loss)
         
         # our LURE estimates and variances
         lure_estimator = LUREEstimator(H, N, C, loss_fn, device)
@@ -229,6 +231,15 @@ def main():
 
         # active model selection loop
         for m in tqdm(range(args.iters)):
+
+            # TESTING: just take model with min loss compared to initial surrogate
+            loss = model._losses()
+            print("loss", loss.shape)
+            print("loss.sum(dim=1).shape", loss.sum(dim=1).shape)
+            min_loss, min_loss_idx = (loss.sum(dim=1) / loss.shape[1]).min(dim=0)
+            print("min predicted loss", min_loss, min_loss_idx)
+            print("true acc of model with min loss", oracle.true_accs[min_loss_idx])
+
             # sample data point
             d_m_idx, qm = model.do_step(d_u_idxs)
 
